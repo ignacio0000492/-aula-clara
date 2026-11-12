@@ -83,6 +83,7 @@
           <button class="btn btn-blue" id="transcribeAudio" disabled>▤ Pasar audio a texto</button>
           <label class="file-label">＋ Cargar audio<input type="file" id="audioFile" accept="audio/*"></label>
           <button class="btn btn-violet" id="splitTranscribeAudio" disabled>✂ Dividir en 3 partes y transcribir</button>
+          <button class="btn btn-danger hidden" id="cancelAudioProcess" type="button" disabled>✕ Cancelar proceso</button>
         </div>
         <div class="statusline" id="recordStatus">La grabación queda en el navegador hasta que la descargues o la transcribas.</div>
         <a id="downloadRecordAudio" class="file-label hidden" download="grabacion-aula-clara.webm">⬇ Descargar audio</a>
@@ -136,6 +137,7 @@
   const config = safeParse(localStorage.getItem('aulaClaraConfig'), {url:'',anon:'',pin:''});
   let liveRecognition = null, liveOn = false, liveMedia = null, liveRecorder = null, liveChunks = [], liveStartedAt = 0, liveTick = null;
   let recordMedia = null, recordRecorder = null, recordChunks = [], recordBlob = null, recordTranscript = '';
+  let audioProcessController = null;
   let liveTranscript = '', interimTranscript = '', lastAiChar = 0, liveAiBusy = false, liveNotesData = {keyPoints:[],concepts:[],summary:''};
   let currentResult = null, currentTitle = '', currentTranscript = '', currentSessionId = null, currentMode = 'live', currentAudioUrl = null;
   const sessionsKey = 'aulaClaraSessions';
@@ -153,12 +155,18 @@
   $('closeSettings').onclick=()=> $('settingsPanel').classList.remove('open');
   $('saveConfig').onclick=()=>{const c={url:$('supabaseUrl').value.trim().replace(/\/$/,''),anon:$('supabaseAnon').value.trim(),pin:$('appPin').value.trim()};localStorage.setItem('aulaClaraConfig',JSON.stringify(c));status('configStatus',isConfigured()?'Configuración guardada.':'Completá los tres campos para activar la IA.',isConfigured()?'good':'');toast('Configuración guardada');};
 
-  async function callAI(payload, audioFile=null){
+  async function callAI(payload, audioFile=null, signal=null){
     const c=getConfig();if(!c.url||!c.anon||!c.pin)throw new Error('Primero configurá la conexión IA desde el botón “Configurar IA”.');
     let body,headers={apikey:c.anon,Authorization:'Bearer '+c.anon,'x-app-pin':c.pin};
     if(audioFile){body=new FormData();body.append('action','transcribe');body.append('audio',audioFile,audioFile.name||'clase-audio.webm');}
     else{headers['Content-Type']='application/json';body=JSON.stringify(payload);}
-    let response;try{response=await fetch(c.url+'/functions/v1/study-assistant',{method:'POST',headers,body});}catch(e){throw new Error('No se pudo conectar con Supabase. Revisá la URL y tu conexión.');}
+    let response;
+    try{
+      response=await fetch(c.url+'/functions/v1/study-assistant',{method:'POST',headers,body,signal:signal||undefined});
+    }catch(e){
+      if(signal?.aborted)throw new DOMException('Proceso cancelado.','AbortError');
+      throw new Error('No se pudo conectar con Supabase. Revisá la URL y tu conexión.');
+    }
     const data=await response.json().catch(()=>({error:'Respuesta inválida del servidor'}));
     if(!response.ok)throw new Error(data.error||data.message||'Error al procesar la solicitud.');
     return data;
@@ -227,17 +235,49 @@
   let recordStartedAt=0,recordTick=null;
   function stopRecord(){if(!recordRecorder||recordRecorder.state==='inactive')return;clearInterval(recordTick);recordRecorder.stop();recordMedia?.getTracks().forEach(t=>t.stop());$('recordVisual').classList.remove('recording');$('startRecord').disabled=false;$('stopRecord').disabled=true;$('recordState').textContent='Grabación terminada';}
   $('startRecord').onclick=startRecord;$('stopRecord').onclick=stopRecord;
+  function beginAudioProcess(){
+    if(audioProcessController)return null;
+    audioProcessController=new AbortController();
+    const cancelButton=$('cancelAudioProcess');
+    cancelButton.classList.remove('hidden');
+    cancelButton.disabled=false;
+    return audioProcessController;
+  }
+
+  function finishAudioProcess(controller){
+    if(audioProcessController!==controller)return;
+    audioProcessController=null;
+    const cancelButton=$('cancelAudioProcess');
+    cancelButton.classList.add('hidden');
+    cancelButton.disabled=true;
+  }
+
+  function cancelAudioProcess(){
+    if(!audioProcessController)return;
+    $('cancelAudioProcess').disabled=true;
+    status('recordStatus','Cancelando el proceso y liberando el audio...');
+    audioProcessController.abort();
+  }
+
+  function throwIfAudioCancelled(signal){
+    if(signal?.aborted)throw new DOMException('Proceso cancelado.','AbortError');
+  }
+
   async function transcribeAudio(file){
     if(!file)return;
     if(file.size>40*1024*1024){
       status('recordStatus','Este archivo supera los 40 MB. Usá “Dividir en 3 partes y transcribir”.','error');
       return;
     }
-    status('recordStatus','Subiendo audio y convirtiéndolo a texto…');
+    const controller=beginAudioProcess();
+    if(!controller)return;
+    const signal=controller.signal;
     $('transcribeAudio').disabled=true;
     $('splitTranscribeAudio').disabled=true;
+    status('recordStatus','Subiendo audio y convirtiéndolo a texto... Podés cancelar cuando quieras.');
     try{
-      const data=await callAI({},file);
+      const data=await callAI({},file,signal);
+      throwIfAudioCancelled(signal);
       recordTranscript=data.transcript||'';
       $('recordTranscript').textContent=recordTranscript||'No se detectó voz clara en el audio.';
       $('summarizeRecord').disabled=!recordTranscript.trim();
@@ -247,16 +287,22 @@
       persistSession({title:currentTitle,transcript:recordTranscript,mode:'record'});
       status('recordStatus','Transcripción terminada. Ya podés generar el resumen.','good');
     }catch(e){
-      status('recordStatus',e.message,'error');
+      if(signal.aborted||e?.name==='AbortError'){
+        status('recordStatus','Proceso cancelado. Podés elegir otro audio o volver a intentarlo.');
+      }else{
+        status('recordStatus',e.message,'error');
+      }
     }finally{
+      finishAudioProcess(controller);
       $('transcribeAudio').disabled=!recordBlob||recordBlob.size>40*1024*1024;
       $('splitTranscribeAudio').disabled=!recordBlob;
     }
   }
 
   // Divide el audio reproduciéndolo dentro del navegador y grabando tres
-  // segmentos comprimidos en Opus. El archivo original nunca se sube entero.
-  async function splitAudioIntoThree(file,onProgress){
+  // segmentos comprimidos en Opus. Se puede cancelar durante cualquier etapa.
+  async function splitAudioIntoThree(file,onProgress,signal){
+    throwIfAudioCancelled(signal);
     const objectUrl=URL.createObjectURL(file);
     const audio=document.createElement('audio');
     audio.preload='auto';
@@ -271,13 +317,26 @@
 
     try{
       await new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>reject(new Error('No se pudo leer la duración del audio.')),30000);
-        audio.addEventListener('loadedmetadata',()=>{clearTimeout(timer);resolve();},{once:true});
-        audio.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('No se pudo abrir el audio. Probá con MP3, WAV, M4A u OGG.'));},{once:true});
-        if(audio.readyState>=1){clearTimeout(timer);resolve();}
+        const cleanup=()=>{
+          clearTimeout(timer);
+          audio.removeEventListener('loadedmetadata',onReady);
+          audio.removeEventListener('error',onError);
+          signal?.removeEventListener('abort',onAbort);
+        };
+        const done=(fn,value)=>{cleanup();fn(value);};
+        const onReady=()=>done(resolve);
+        const onError=()=>done(reject,new Error('No se pudo abrir el audio. Probá con MP3, WAV, M4A u OGG.'));
+        const onAbort=()=>done(reject,new DOMException('Proceso cancelado.','AbortError'));
+        const timer=setTimeout(()=>done(reject,new Error('No se pudo leer la duración del audio.')),30000);
+        audio.addEventListener('loadedmetadata',onReady,{once:true});
+        audio.addEventListener('error',onError,{once:true});
+        signal?.addEventListener('abort',onAbort,{once:true});
+        if(signal?.aborted){onAbort();return;}
+        if(audio.readyState>=1)onReady();
         else audio.load();
       });
 
+      throwIfAudioCancelled(signal);
       const duration=audio.duration;
       if(!Number.isFinite(duration)||duration<=0)throw new Error('No se pudo detectar la duración del audio.');
       if(duration>3*60*60)throw new Error('El audio supera las 3 horas. Para mantener cada parte debajo del límite de carga, esta función admite hasta 3 horas.');
@@ -290,6 +349,7 @@
 
       audioContext=new AudioContextClass();
       await audioContext.resume();
+      throwIfAudioCancelled(signal);
       source=audioContext.createMediaElementSource(audio);
       destination=audioContext.createMediaStreamDestination();
       source.connect(destination);
@@ -299,15 +359,27 @@
       const maxPartSize=18*1024*1024;
 
       async function seekTo(seconds){
+        throwIfAudioCancelled(signal);
         if(Math.abs(audio.currentTime-seconds)<0.05)return;
         await new Promise((resolve,reject)=>{
-          const timer=setTimeout(()=>reject(new Error('No se pudo ubicar el inicio de la siguiente parte.')),15000);
-          audio.addEventListener('seeked',()=>{clearTimeout(timer);resolve();},{once:true});
+          const cleanup=()=>{
+            clearTimeout(timer);
+            audio.removeEventListener('seeked',onSeeked);
+            signal?.removeEventListener('abort',onAbort);
+          };
+          const done=(fn,value)=>{cleanup();fn(value);};
+          const onSeeked=()=>done(resolve);
+          const onAbort=()=>done(reject,new DOMException('Proceso cancelado.','AbortError'));
+          const timer=setTimeout(()=>done(reject,new Error('No se pudo ubicar el inicio de la siguiente parte.')),15000);
+          audio.addEventListener('seeked',onSeeked,{once:true});
+          signal?.addEventListener('abort',onAbort,{once:true});
+          if(signal?.aborted){onAbort();return;}
           audio.currentTime=seconds;
         });
       }
 
       async function recordPart(start,end,index){
+        throwIfAudioCancelled(signal);
         await seekTo(start);
         const chunks=[];
         const recorder=new MediaRecorder(destination.stream,{mimeType,audioBitsPerSecond:32000});
@@ -320,21 +392,34 @@
         recorder.start(1000);
         try{
           await audio.play();
+          throwIfAudioCancelled(signal);
           await new Promise((resolve,reject)=>{
-            const timeout=setTimeout(()=>{audio.pause();reject(new Error('La reproducción tardó demasiado al crear la parte '+index+'.'));},Math.max(60000,(end-start)*1000+30000));
-            const check=setInterval(()=>{
-              if(audio.currentTime>=end-0.04||audio.ended){
-                clearInterval(check);
-                clearTimeout(timeout);
-                audio.pause();
-                resolve();
-              }
-            },100);
-            audio.addEventListener('error',()=>{
+            let check=null;
+            const cleanup=()=>{
               clearInterval(check);
               clearTimeout(timeout);
-              reject(new Error('El audio tuvo un error durante la división.'));
-            },{once:true});
+              signal?.removeEventListener('abort',onAbort);
+              audio.removeEventListener('error',onError);
+            };
+            const done=(fn,value)=>{cleanup();fn(value);};
+            const onAbort=()=>{
+              audio.pause();
+              done(reject,new DOMException('Proceso cancelado.','AbortError'));
+            };
+            const onError=()=>done(reject,new Error('El audio tuvo un error durante la división.'));
+            const timeout=setTimeout(()=>{
+              audio.pause();
+              done(reject,new Error('La reproducción tardó demasiado al crear la parte '+index+'.'));
+            },Math.max(60000,(end-start)*1000+30000));
+            check=setInterval(()=>{
+              if(audio.currentTime>=end-0.04||audio.ended){
+                audio.pause();
+                done(resolve);
+              }
+            },100);
+            signal?.addEventListener('abort',onAbort,{once:true});
+            audio.addEventListener('error',onError,{once:true});
+            if(signal?.aborted)onAbort();
           });
         }catch(error){
           audio.pause();
@@ -345,6 +430,7 @@
 
         if(recorder.state!=='inactive')recorder.stop();
         const blob=await finished;
+        throwIfAudioCancelled(signal);
         if(!blob.size)throw new Error('La parte '+index+' quedó vacía.');
         if(blob.size>maxPartSize)throw new Error('La parte '+index+' supera los 18 MB incluso comprimida. El audio es demasiado largo para dividirlo solamente en tres partes.');
 
@@ -354,7 +440,8 @@
       }
 
       for(let i=0;i<3;i++){
-        onProgress('Creando parte '+(i+1)+' de 3...');
+        throwIfAudioCancelled(signal);
+        onProgress('Creando parte '+(i+1)+' de 3... Podés cancelar el proceso.');
         const start=i*partDuration;
         const end=i===2?duration:(i+1)*partDuration;
         parts.push(await recordPart(start,end,i+1));
@@ -381,6 +468,9 @@
       return;
     }
 
+    const controller=beginAudioProcess();
+    if(!controller)return;
+    const signal=controller.signal;
     const splitButton=$('splitTranscribeAudio');
     splitButton.disabled=true;
     $('transcribeAudio').disabled=true;
@@ -391,10 +481,12 @@
     const completed=[];
 
     try{
-      const parts=await splitAudioIntoThree(file,message=>status('recordStatus',message));
+      const parts=await splitAudioIntoThree(file,message=>status('recordStatus',message),signal);
       for(let i=0;i<parts.length;i++){
-        status('recordStatus','Transcribiendo parte '+(i+1)+' de 3 con Gemini...');
-        const result=await callAI({},parts[i]);
+        throwIfAudioCancelled(signal);
+        status('recordStatus','Transcribiendo parte '+(i+1)+' de 3 con Gemini... Podés cancelar.');
+        const result=await callAI({},parts[i],signal);
+        throwIfAudioCancelled(signal);
         const text=(result.transcript||'').trim();
         if(!text)throw new Error('Gemini no detectó voz en la parte '+(i+1)+'.');
 
@@ -410,12 +502,17 @@
 
       status('recordStatus','¡Listo! Las tres partes se transcribieron y se unieron en un solo texto.','good');
     }catch(error){
-      status('recordStatus',error.message||'No se pudo dividir o transcribir el audio.','error');
+      if(signal.aborted||error?.name==='AbortError'){
+        status('recordStatus','Proceso cancelado. Las partes ya transcritas se conservaron. Podés elegir otro audio o volver a intentarlo.');
+      }else{
+        status('recordStatus',error.message||'No se pudo dividir o transcribir el audio.','error');
+      }
       if(recordTranscript.trim()){
         $('summarizeRecord').disabled=false;
         $('downloadRecordText').disabled=false;
       }
     }finally{
+      finishAudioProcess(controller);
       splitButton.disabled=!recordBlob;
       $('transcribeAudio').disabled=!recordBlob||recordBlob.size>40*1024*1024;
     }
@@ -423,6 +520,7 @@
 
   $('transcribeAudio').onclick=()=>transcribeAudio(recordBlob);
   $('splitTranscribeAudio').onclick=()=>transcribeThreeParts(recordBlob);
+  $('cancelAudioProcess').onclick=cancelAudioProcess;
   $('audioFile').onchange=e=>{
     const file=e.target.files?.[0];
     if(!file)return;
