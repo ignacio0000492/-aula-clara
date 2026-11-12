@@ -1,0 +1,11 @@
+{
+  "name": "Aula Clara - Asistente de estudio",
+  "short_name": "Aula Clara",
+  "description": "Grabá, transcribí y convertí tus clases en material de estudio.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#10172b",
+  "orientation": "any",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

@@ -1,0 +1,21 @@
+AULA CLARA — ARCHIVOS PARA PUBLICAR EN GITHUB PAGES
+
+Subí el CONTENIDO de esta carpeta a la raíz de tu repositorio GitHub:
+- index.html
+- manifest.json
+- sw.js
+- icon.svg
+
+No subas la carpeta contenedora como una carpeta dentro del repositorio.
+index.html debe quedar directamente en la raíz.
+
+Luego en GitHub: Settings > Pages > Deploy from a branch > main > /(root) > Save.
+
+Cuando GitHub Pages publique el sitio, abrí la URL HTTPS que te indique GitHub.
+En Aula Clara, Configurar IA, completá:
+Project URL: https://xqjqjzfltsltcberycsv.supabase.co
+Clave pública: tu clave sb_publishable_...
+PIN: el mismo valor que guardaste en APP_ACCESS_PIN de Supabase.
+
+La clave GEMINI_API_KEY permanece exclusivamente en Supabase Secrets.
+La función Supabase debe tener Verify JWT desactivado si se invoca con clave publishable y PIN de aplicación; el endpoint además valida x-app-pin.
