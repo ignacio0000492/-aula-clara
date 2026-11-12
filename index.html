@@ -216,10 +216,10 @@
       $('recordAudio').classList.remove('hidden');
       $('downloadRecordAudio').href=currentAudioUrl;
       $('downloadRecordAudio').classList.remove('hidden');
-      $('transcribeAudio').disabled=!blob.size||blob.size>18*1024*1024;
+      $('transcribeAudio').disabled=!blob.size||blob.size>40*1024*1024;
       $('splitTranscribeAudio').disabled=!blob.size;
-      if(blob.size>18*1024*1024){
-        status('recordStatus','Grabación lista. Por su tamaño, utilizá “Dividir en 3 partes y transcribir”.','good');
+      if(blob.size>40*1024*1024){
+        status('recordStatus','Grabación lista. Podés enviarla directamente a transcribir.','good');
       }
     }
   }
@@ -229,8 +229,8 @@
   $('startRecord').onclick=startRecord;$('stopRecord').onclick=stopRecord;
   async function transcribeAudio(file){
     if(!file)return;
-    if(file.size>18*1024*1024){
-      status('recordStatus','Este archivo es demasiado grande para enviarlo directamente. Usá “Dividir en 3 partes y transcribir”.','error');
+    if(file.size>40*1024*1024){
+      status('recordStatus','Este archivo supera los 40 MB. Usá “Dividir en 3 partes y transcribir”.','error');
       return;
     }
     status('recordStatus','Subiendo audio y convirtiéndolo a texto…');
@@ -249,7 +249,7 @@
     }catch(e){
       status('recordStatus',e.message,'error');
     }finally{
-      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>18*1024*1024;
+      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>40*1024*1024;
       $('splitTranscribeAudio').disabled=!recordBlob;
     }
   }
@@ -417,7 +417,7 @@
       }
     }finally{
       splitButton.disabled=!recordBlob;
-      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>18*1024*1024;
+      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>40*1024*1024;
     }
   }
 
@@ -428,9 +428,9 @@
     if(!file)return;
     recordBlob=file;
     $('splitTranscribeAudio').disabled=false;
-    $('transcribeAudio').disabled=file.size>18*1024*1024;
+    $('transcribeAudio').disabled=file.size>40*1024*1024;
     const sizeMB=(file.size/(1024*1024)).toFixed(1);
-    if(file.size>18*1024*1024){
+    if(file.size>40*1024*1024){
       status('recordStatus','Archivo listo: '+file.name+' ('+sizeMB+' MB). Usá “Dividir en 3 partes y transcribir”.','good');
     }else{
       status('recordStatus','Archivo listo: '+file.name+' ('+sizeMB+' MB). Podés transcribirlo directamente o dividirlo en tres partes.','good');
