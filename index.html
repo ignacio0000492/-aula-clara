@@ -83,7 +83,7 @@
           <button class="btn btn-blue" id="transcribeAudio" disabled>▤ Pasar audio a texto</button>
           <label class="file-label">＋ Cargar audio<input type="file" id="audioFile" accept="audio/*"></label>
           <button class="btn btn-violet" id="splitTranscribeAudio" disabled>✂ Dividir en 3 partes y transcribir</button>
-          <button class="btn btn-danger hidden" id="cancelAudioProcess" type="button" disabled>✕ Cancelar proceso</button>
+          <button class="btn btn-danger" id="cancelAudioProcess" type="button" disabled title="Se activa mientras Aula Clara procesa el audio">✕ Cancelar proceso</button>
         </div>
         <div class="statusline" id="recordStatus">La grabación queda en el navegador hasta que la descargues o la transcribas.</div>
         <a id="downloadRecordAudio" class="file-label hidden" download="grabacion-aula-clara.webm">⬇ Descargar audio</a>
@@ -239,8 +239,8 @@
     if(audioProcessController)return null;
     audioProcessController=new AbortController();
     const cancelButton=$('cancelAudioProcess');
-    cancelButton.classList.remove('hidden');
     cancelButton.disabled=false;
+    cancelButton.textContent='✕ Cancelar proceso';
     return audioProcessController;
   }
 
@@ -248,13 +248,14 @@
     if(audioProcessController!==controller)return;
     audioProcessController=null;
     const cancelButton=$('cancelAudioProcess');
-    cancelButton.classList.add('hidden');
     cancelButton.disabled=true;
+    cancelButton.textContent='✕ Cancelar proceso';
   }
 
   function cancelAudioProcess(){
     if(!audioProcessController)return;
     $('cancelAudioProcess').disabled=true;
+    $('cancelAudioProcess').textContent='Cancelando...';
     status('recordStatus','Cancelando el proceso y liberando el audio...');
     audioProcessController.abort();
   }
