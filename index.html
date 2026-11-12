@@ -1,3 +1,579 @@
+mi app tiene la opcion de agregar audio de mis archivos tambien, pero no me deja si supera los 20 mb hy me pide q lo separe en 3 partes, entonces quiero que la misma app tambien tenga esa opcion de dividir el audio en 3 partes para poder ponerlo ahi y que me lo pase a texto
+Sí, vamos a incorporarlo a Aula Clara. La idea es que no tengas que cortar ni editar el audio con otra aplicación.
+
+En la pestaña Grabar audio agregaremos un botón nuevo:
+
+＋ Cargar audio
+
+✂ Dividir en 3 partes y transcribir
+
+Nuevo
+Seleccionás el archivo completo. Aula Clara lo divide automáticamente, transcribe cada parte en orden y une los tres textos en una sola transcripción.
+
+Voy a conservar también el botón actual para los audios pequeños. Para las partes nuevas se utilizará audio comprimido para voz, con un límite de seguridad inferior a los 20 MB que tiene actualmente nuestra función. Gemini admite hasta una hora por archivo en la transcripción estándar. 
+
+ai.google.dev
++1
+
+1. Agregar el nuevo botón en la pantalla
+En GitHub entrá al repositorio ignacio0000492/-aula-clara, abrí index.html y presioná el lápiz para editar.
+
+Buscá este bloque:
+
+
+<div class="btn-row" style="margin-top:12px"><button class="btn btn-blue" id="transcribeAudio" disabled>▤ Pasar audio a texto</button><label class="file-label">＋ Cargar audio<input type="file" id="audioFile" accept="audio/*"></label></div>
+
+Reemplazalo por este:
+
+
+<div class="btn-row" style="margin-top:12px">
+  <button class="btn btn-blue" id="transcribeAudio" disabled>
+    ▤ Pasar audio a texto
+  </button>
+  <label class="file-label">
+    ＋ Cargar audio
+    <input type="file" id="audioFile" accept="audio/*">
+  </label>
+  <button class="btn btn-violet" id="splitTranscribeAudio" disabled>
+    ✂ Dividir en 3 partes y transcribir
+  </button>
+</div>
+
+2. Agregar el sistema que divide el audio
+En el mismo archivo, buscá esta línea:
+
+$('transcribeAudio').onclick=()=>transcribeAudio(recordBlob);
+
+Un poco más abajo vas a encontrar el código que empieza con:
+
+$('audioFile').onchange=e=>{
+
+Reemplazá esas dos instrucciones completas por todo este bloque:
+
+
+// ==========================================
+// DIVISIÓN AUTOMÁTICA DEL AUDIO EN 3 PARTES
+// ==========================================
+
+async function splitAudioFileIntoThree(file, onProgress) {
+  const url = URL.createObjectURL(file);
+  const audio = document.createElement('audio');
+
+  audio.preload = 'auto';
+  audio.src = url;
+  audio.style.display = 'none';
+  audio.playsInline = true;
+
+  document.body.appendChild(audio);
+
+  let audioContext = null;
+  let source = null;
+  let destination = null;
+
+  try {
+    // Esperar a que el navegador lea la duración.
+    await new Promise((resolve, reject) => {
+      if (audio.readyState >= 1) {
+        resolve();
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        reject(new Error(
+          'El navegador tardó demasiado en leer el audio.'
+        ));
+      }, 30000);
+
+      audio.addEventListener('loadedmetadata', () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+
+      audio.addEventListener('error', () => {
+        clearTimeout(timer);
+        reject(new Error(
+          'No se pudo abrir este formato de audio. Probá con MP3, WAV, M4A u OGG.'
+        ));
+      }, { once: true });
+
+      audio.load();
+    });
+
+    const duration = audio.duration;
+
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error('No se pudo detectar la duración del audio.');
+    }
+
+    if (duration > 3 * 60 * 60) {
+      throw new Error(
+        'El audio supera las 3 horas. Esta división permite procesar hasta 3 horas en tres partes.'
+      );
+    }
+
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextClass || !window.MediaRecorder) {
+      throw new Error(
+        'Tu navegador no permite dividir audio automáticamente. Usá Chrome actualizado.'
+      );
+    }
+
+    audioContext = new AudioContextClass();
+    await audioContext.resume();
+
+    // Procesar el sonido sin tener que cargar todo el audio
+    // descomprimido en la memoria del celular.
+    source = audioContext.createMediaElementSource(audio);
+    destination = audioContext.createMediaStreamDestination();
+
+    source.connect(destination);
+
+    const mimeCandidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm'
+    ];
+
+    const mimeType = mimeCandidates.find(type =>
+      MediaRecorder.isTypeSupported(type)
+    );
+
+    if (!mimeType) {
+      throw new Error(
+        'Este navegador no admite el formato necesario para dividir el audio.'
+      );
+    }
+
+    const parts = [];
+    const partDuration = duration / 3;
+    const maxPartSize = 18 * 1024 * 1024;
+
+    // Mover el reproductor a una posición exacta.
+    async function seekTo(seconds) {
+      if (Math.abs(audio.currentTime - seconds) < 0.05) {
+        return;
+      }
+
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error('No se pudo avanzar a la parte siguiente.'));
+        }, 15000);
+
+        audio.addEventListener('seeked', () => {
+          clearTimeout(timer);
+          resolve();
+        }, { once: true });
+
+        audio.currentTime = seconds;
+      });
+    }
+
+    // Crear y grabar una parte independiente.
+    async function recordPart(start, end, number) {
+      await seekTo(start);
+
+      const chunks = [];
+
+      const recorder = new MediaRecorder(
+        destination.stream,
+        {
+          mimeType,
+          audioBitsPerSecond: 32000
+        }
+      );
+
+      const recordingFinished = new Promise((resolve, reject) => {
+        recorder.ondataavailable = event => {
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        };
+
+        recorder.onerror = () => {
+          reject(new Error(
+            'Se produjo un error al crear la parte ' + number + '.'
+          ));
+        };
+
+        recorder.onstop = () => {
+          resolve(new Blob(chunks, {
+            type: recorder.mimeType || mimeType
+          }));
+        };
+      });
+
+      recorder.start(1000);
+
+      let playbackError = null;
+
+      try {
+        await audio.play();
+
+        await new Promise((resolve, reject) => {
+          const timer = setInterval(() => {
+            if (
+              audio.currentTime >= end ||
+              audio.ended
+            ) {
+              clearInterval(timer);
+              audio.pause();
+              resolve();
+            }
+          }, 80);
+
+          audio.addEventListener('error', () => {
+            clearInterval(timer);
+            reject(new Error(
+              'Error al reproducir el audio durante la división.'
+            ));
+          }, { once: true });
+        });
+
+      } catch (error) {
+        playbackError = error;
+
+      } finally {
+        audio.pause();
+
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      }
+
+      const blob = await recordingFinished;
+
+      if (playbackError) {
+        throw new Error(
+          'Chrome no pudo procesar el audio. Intentá nuevamente.'
+        );
+      }
+
+      if (!blob.size) {
+        throw new Error(
+          'La parte ' + number + ' quedó vacía.'
+        );
+      }
+
+      if (blob.size > maxPartSize) {
+        throw new Error(
+          'La parte ' + number +
+          ' supera los 18 MB. No se envió para evitar un error de carga.'
+        );
+      }
+
+      return new File(
+        [blob],
+        'audio-parte-' + number + '.webm',
+        {
+          type: 'audio/webm',
+          lastModified: Date.now()
+        }
+      );
+    }
+
+    for (let i = 0; i < 3; i++) {
+      const start = i * partDuration;
+      const end = i === 2
+        ? duration
+        : (i + 1) * partDuration;
+
+      onProgress(
+        'Dividiendo el audio: parte ' + (i + 1) + ' de 3...'
+      );
+
+      const part = await recordPart(
+        start,
+        end,
+        i + 1
+      );
+
+      parts.push(part);
+    }
+
+    return parts;
+
+  } finally {
+    audio.pause();
+
+    try {
+      source?.disconnect();
+      destination?.stream.getTracks().forEach(track => track.stop());
+    } catch (e) {}
+
+    if (audioContext && audioContext.state !== 'closed') {
+      await audioContext.close().catch(() => {});
+    }
+
+    audio.removeAttribute('src');
+    audio.load();
+    audio.remove();
+
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ==========================================
+// TRANSCRIBIR LAS 3 PARTES EN ORDEN
+// ==========================================
+
+async function transcribeThreeParts(file) {
+  if (!file) return;
+
+  const button = $('splitTranscribeAudio');
+
+  button.disabled = true;
+  $('transcribeAudio').disabled = true;
+  $('summarizeRecord').disabled = true;
+  $('downloadRecordText').disabled = true;
+
+  recordTranscript = '';
+  $('recordTranscript').textContent =
+    'Preparando las tres partes del audio...';
+
+  const completedTexts = [];
+
+  try {
+    if (!isConfigured()) {
+      throw new Error(
+        'Primero configurá la conexión IA.'
+      );
+    }
+
+    status(
+      'recordStatus',
+      'Preparando el audio para dividirlo automáticamente...'
+    );
+
+    const parts = await splitAudioFileIntoThree(
+      file,
+      message => status('recordStatus', message)
+    );
+
+    for (let i = 0; i < parts.length; i++) {
+
+      status(
+        'recordStatus',
+        'Enviando parte ' + (i + 1) +
+        ' de 3 a Gemini para transcribir...'
+      );
+
+      const result = await callAI({}, parts[i]);
+
+      const text = (result.transcript || '').trim();
+
+      if (!text) {
+        throw new Error(
+          'No se detectó voz en la parte ' + (i + 1) + '.'
+        );
+      }
+
+      completedTexts.push(
+        'PARTE ' + (i + 1) + ' DE 3\n\n' + text
+      );
+
+      // Mostrar y guardar los resultados parciales.
+      recordTranscript = completedTexts.join('\n\n');
+
+      $('recordTranscript').textContent = recordTranscript;
+      $('summarizeRecord').disabled = false;
+      $('downloadRecordText').disabled = false;
+
+      persistSession({
+        title: getTitle('recordTitle'),
+        transcript: recordTranscript,
+        mode: 'record'
+      });
+
+      status(
+        'recordStatus',
+        'Parte ' + (i + 1) +
+        ' de 3 transcripta correctamente.',
+        'good'
+      );
+    }
+
+    currentTitle = getTitle('recordTitle');
+    currentTranscript = recordTranscript;
+    currentResult = null;
+
+    $('recordTranscript').textContent = recordTranscript;
+
+    status(
+      'recordStatus',
+      '¡Audio completo! Las tres partes fueron transcritas y unidas correctamente.',
+      'good'
+    );
+
+  } catch (error) {
+    status(
+      'recordStatus',
+      error.message || 'No se pudo procesar el audio.',
+      'error'
+    );
+
+    // Si alguna parte llegó a completarse, se conserva.
+    if (recordTranscript.trim()) {
+      $('summarizeRecord').disabled = false;
+      $('downloadRecordText').disabled = false;
+    }
+
+  } finally {
+    button.disabled = false;
+    $('transcribeAudio').disabled = !recordBlob;
+  }
+}
+
+// ==========================================
+// BOTONES Y CARGA DE ARCHIVOS
+// ==========================================
+
+$('transcribeAudio').onclick = () =>
+  transcribeAudio(recordBlob);
+
+$('splitTranscribeAudio').onclick = () =>
+  transcribeThreeParts(recordBlob);
+
+$('audioFile').onchange = event => {
+  const file = event.target.files?.[0];
+
+  if (!file) return;
+
+  recordBlob = file;
+
+  const sizeMB = file.size / (1024 * 1024);
+  const tooLarge = file.size >= 18 * 1024 * 1024;
+
+  $('splitTranscribeAudio').disabled = false;
+  $('transcribeAudio').disabled = tooLarge;
+
+  if (tooLarge) {
+    status(
+      'recordStatus',
+      'Archivo cargado: ' + file.name +
+      ' (' + sizeMB.toFixed(1) + ' MB). Usá “Dividir en 3 partes y transcribir”.',
+      'good'
+    );
+  } else {
+    $('transcribeAudio').disabled = false;
+
+    status(
+      'recordStatus',
+      'Archivo listo: ' + file.name +
+      '. Podés transcribirlo normalmente o dividirlo en tres partes.',
+      'good'
+    );
+  }
+};
+
+3. Una última modificación
+Buscá la función que comienza así:
+
+function showAudioBlob(blob,kind){
+
+Reemplazala completa por esta:
+
+
+function showAudioBlob(blob,kind){
+  if(currentAudioUrl)URL.revokeObjectURL(currentAudioUrl);
+
+  currentAudioUrl=URL.createObjectURL(blob);
+
+  if(kind==='live'){
+    $('liveAudio').src=currentAudioUrl;
+    $('liveAudioWrap').classList.remove('hidden');
+    $('downloadLiveAudio').href=currentAudioUrl;
+  }else{
+    $('recordAudio').src=currentAudioUrl;
+    $('recordAudio').classList.remove('hidden');
+    $('downloadRecordAudio').href=currentAudioUrl;
+    $('downloadRecordAudio').classList.remove('hidden');
+
+    const tooLarge = blob.size >= 18 * 1024 * 1024;
+
+    $('transcribeAudio').disabled=tooLarge;
+    $('splitTranscribeAudio').disabled=false;
+
+    if(tooLarge){
+      status(
+        'recordStatus',
+        'Grabación lista. Por su tamaño, utilizá la división automática en tres partes.',
+        'good'
+      );
+    }
+  }
+}
+
+4. Guardar los cambios
+En GitHub presioná Commit changes para publicar el index.html.
+
+Después abrí Aula Clara y actualizá la página.
+
+Probemos primero con un audio de prueba.
+
+Entrá en Grabar audio.
+
+Cargá un archivo de más de 20 MB.
+
+Presioná Dividir en 3 partes y transcribir.
+
+La app irá mostrando el avance y unirá los textos de las tres partes.
+
+Al terminar, podrás presionar Resumir y explicar.
+
+Importante: la división se hace dentro del navegador, sin subir el archivo original entero a Supabase. El audio se reproduce internamente para generar tres archivos WebM comprimidos. Está pensado para Chrome en Android y Edge/Chrome en PC; no pude probarlo en tu dispositivo, así que conviene hacer primero una prueba con un audio de unos minutos. Si una parte supera los 18 MB, la aplicación avisará en lugar de enviarla y provocar un error.
+
+
+Texto pegado(7).txt
+Documento
+el codigo es muy largo, remplazamelo editado correctamente, es este:
+
+Ha pensado durante 4m 14s
+¡Listo! Tomé tu archivo original de Aula Clara y le incorporé la función de división automática. No tenés que combinar fragmentos de código ni modificar nada manualmente.
+
+Aula Clara — Código completo actualizado
+
+index.html · 59 KB · archivo completo
+
+Listo
+Descargar archivo HTML actualizado
+
+Abrir versión TXT para copiar el código
+
+Qué incorporé
+Nuevo botón «Dividir en 3 partes y transcribir».
+
+División automática del audio en tres segmentos.
+
+Compresión de cada segmento para reducir su tamaño.
+
+Envío de las tres partes a Gemini, una detrás de otra.
+
+Unión de las transcripciones en un solo texto.
+
+Guardado progresivo para no perder las partes ya transcritas si ocurre un error.
+
+También revisé la sintaxis de JavaScript y pasó la comprobación. Todavía falta probarlo en el navegador real.
+
+Cómo reemplazarlo en GitHub
+Descargá el archivo TXT.
+
+Abrilo y copiá todo con CTRL + A y CTRL + C.
+
+Entrá a GitHub → tu repositorio → index.html → lápiz.
+
+Borrá el código anterior y pegá el nuevo.
+
+Presioná Commit changes.
+
+No modifiques Supabase para este cambio. Esta mejora se incorpora en el archivo de la aplicación.
+
+
+aula-clara-index-actualizado.txt
+Documento
+
+aula-clara-index-actualizado.html
+HTML
 <!doctype html>
 <html lang="es-AR">
 <head>
@@ -79,7 +655,11 @@
         <div class="recorder-visual" id="recordVisual"><div class="mic-orb">🎧</div><div class="timer" id="recordTimer">00:00:00</div><div class="live-state" id="recordState">Micrófono apagado</div></div>
         <div class="btn-row"><button class="btn btn-primary" id="startRecord">● Empezar a grabar</button><button class="btn btn-danger" id="stopRecord" disabled>■ Detener</button></div>
         <audio id="recordAudio" controls class="hidden"></audio>
-        <div class="btn-row" style="margin-top:12px"><button class="btn btn-blue" id="transcribeAudio" disabled>▤ Pasar audio a texto</button><label class="file-label">＋ Cargar audio<input type="file" id="audioFile" accept="audio/*"></label></div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-blue" id="transcribeAudio" disabled>▤ Pasar audio a texto</button>
+          <label class="file-label">＋ Cargar audio<input type="file" id="audioFile" accept="audio/*"></label>
+          <button class="btn btn-violet" id="splitTranscribeAudio" disabled>✂ Dividir en 3 partes y transcribir</button>
+        </div>
         <div class="statusline" id="recordStatus">La grabación queda en el navegador hasta que la descargues o la transcribas.</div>
         <a id="downloadRecordAudio" class="file-label hidden" download="grabacion-aula-clara.webm">⬇ Descargar audio</a>
       </div>
@@ -200,14 +780,238 @@
   $('exportLiveTranscript').onclick=()=>downloadText(liveTranscript,'transcripcion-clase.txt','text/plain');
   $('makeFinalNotes').onclick=async()=>{if(!liveTranscript.trim())return;status('liveStatus','Preparando el resumen completo de la clase…');try{const data=await callAI({action:'summarize',mode:'full',title:getTitle('liveTitle'),transcript:liveTranscript});currentTitle=getTitle('liveTitle');currentTranscript=liveTranscript;currentResult=data.study||data;persistSession({title:currentTitle,transcript:currentTranscript,result:currentResult,mode:'live'});$('outputHeading').textContent=currentTitle;renderStudy(currentResult);$('outputWrap').classList.remove('hidden');$('outputWrap').scrollIntoView({behavior:'smooth'});status('liveStatus','Resumen final listo.','good');}catch(e){status('liveStatus',e.message,'error');}};
 
-  function showAudioBlob(blob,kind){if(currentAudioUrl)URL.revokeObjectURL(currentAudioUrl);currentAudioUrl=URL.createObjectURL(blob);if(kind==='live'){$('liveAudio').src=currentAudioUrl;$('liveAudioWrap').classList.remove('hidden');$('downloadLiveAudio').href=currentAudioUrl;}else{$('recordAudio').src=currentAudioUrl;$('recordAudio').classList.remove('hidden');$('downloadRecordAudio').href=currentAudioUrl;$('downloadRecordAudio').classList.remove('hidden');$('transcribeAudio').disabled=false;}}
-  async function startRecord(){currentSessionId=null;currentResult=null;recordTranscript='';$('recordTranscript').textContent='La transcripción aparecerá acá después de procesar el audio.';$('summarizeRecord').disabled=true;$('downloadRecordText').disabled=true;try{recordMedia=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){status('recordStatus','No se pudo acceder al micrófono. Permití el acceso en el navegador.','error');return;}recordChunks=[];recordBlob=null;recordRecorder=new MediaRecorder(recordMedia);recordRecorder.ondataavailable=e=>{if(e.data.size)recordChunks.push(e.data);};recordRecorder.onstop=()=>{recordBlob=new Blob(recordChunks,{type:recordRecorder.mimeType||'audio/webm'});showAudioBlob(recordBlob,'record');status('recordStatus','Grabación lista. Ahora podés transcribirla o descargarla.','good');};recordRecorder.start(1000);$('recordVisual').classList.add('recording');$('startRecord').disabled=true;$('stopRecord').disabled=false;$('recordState').textContent='Grabando…';recordStartedAt=Date.now();recordTick=setInterval(()=>{$('recordTimer').textContent=formatTime(Math.floor((Date.now()-recordStartedAt)/1000));},1000);status('recordStatus','Grabación en curso…');}
+  function showAudioBlob(blob,kind){
+    if(currentAudioUrl)URL.revokeObjectURL(currentAudioUrl);
+    currentAudioUrl=URL.createObjectURL(blob);
+    if(kind==='live'){
+      $('liveAudio').src=currentAudioUrl;
+      $('liveAudioWrap').classList.remove('hidden');
+      $('downloadLiveAudio').href=currentAudioUrl;
+    }else{
+      $('recordAudio').src=currentAudioUrl;
+      $('recordAudio').classList.remove('hidden');
+      $('downloadRecordAudio').href=currentAudioUrl;
+      $('downloadRecordAudio').classList.remove('hidden');
+      $('transcribeAudio').disabled=!blob.size||blob.size>18*1024*1024;
+      $('splitTranscribeAudio').disabled=!blob.size;
+      if(blob.size>18*1024*1024){
+        status('recordStatus','Grabación lista. Por su tamaño, utilizá “Dividir en 3 partes y transcribir”.','good');
+      }
+    }
+  }
+  async function startRecord(){currentSessionId=null;currentResult=null;recordTranscript='';$('recordTranscript').textContent='La transcripción aparecerá acá después de procesar el audio.';$('summarizeRecord').disabled=true;$('downloadRecordText').disabled=true;$('transcribeAudio').disabled=true;$('splitTranscribeAudio').disabled=true;try{recordMedia=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){status('recordStatus','No se pudo acceder al micrófono. Permití el acceso en el navegador.','error');return;}recordChunks=[];recordBlob=null;recordRecorder=new MediaRecorder(recordMedia);recordRecorder.ondataavailable=e=>{if(e.data.size)recordChunks.push(e.data);};recordRecorder.onstop=()=>{recordBlob=new Blob(recordChunks,{type:recordRecorder.mimeType||'audio/webm'});showAudioBlob(recordBlob,'record');status('recordStatus','Grabación lista. Ahora podés transcribirla o descargarla.','good');};recordRecorder.start(1000);$('recordVisual').classList.add('recording');$('startRecord').disabled=true;$('stopRecord').disabled=false;$('recordState').textContent='Grabando…';recordStartedAt=Date.now();recordTick=setInterval(()=>{$('recordTimer').textContent=formatTime(Math.floor((Date.now()-recordStartedAt)/1000));},1000);status('recordStatus','Grabación en curso…');}
   let recordStartedAt=0,recordTick=null;
   function stopRecord(){if(!recordRecorder||recordRecorder.state==='inactive')return;clearInterval(recordTick);recordRecorder.stop();recordMedia?.getTracks().forEach(t=>t.stop());$('recordVisual').classList.remove('recording');$('startRecord').disabled=false;$('stopRecord').disabled=true;$('recordState').textContent='Grabación terminada';}
   $('startRecord').onclick=startRecord;$('stopRecord').onclick=stopRecord;
-  async function transcribeAudio(file){if(!file)return;status('recordStatus','Subiendo audio y convirtiéndolo a texto…');$('transcribeAudio').disabled=true;try{const data=await callAI({},file);recordTranscript=data.transcript||'';$('recordTranscript').textContent=recordTranscript||'No se detectó voz clara en el audio.';$('summarizeRecord').disabled=!recordTranscript.trim();$('downloadRecordText').disabled=!recordTranscript.trim();currentTitle=getTitle('recordTitle');currentTranscript=recordTranscript;persistSession({title:currentTitle,transcript:recordTranscript,mode:'record'});status('recordStatus','Transcripción terminada. Ya podés generar el resumen.','good');}catch(e){status('recordStatus',e.message,'error');}finally{$('transcribeAudio').disabled=false;}}
+  async function transcribeAudio(file){
+    if(!file)return;
+    if(file.size>18*1024*1024){
+      status('recordStatus','Este archivo es demasiado grande para enviarlo directamente. Usá “Dividir en 3 partes y transcribir”.','error');
+      return;
+    }
+    status('recordStatus','Subiendo audio y convirtiéndolo a texto…');
+    $('transcribeAudio').disabled=true;
+    $('splitTranscribeAudio').disabled=true;
+    try{
+      const data=await callAI({},file);
+      recordTranscript=data.transcript||'';
+      $('recordTranscript').textContent=recordTranscript||'No se detectó voz clara en el audio.';
+      $('summarizeRecord').disabled=!recordTranscript.trim();
+      $('downloadRecordText').disabled=!recordTranscript.trim();
+      currentTitle=getTitle('recordTitle');
+      currentTranscript=recordTranscript;
+      persistSession({title:currentTitle,transcript:recordTranscript,mode:'record'});
+      status('recordStatus','Transcripción terminada. Ya podés generar el resumen.','good');
+    }catch(e){
+      status('recordStatus',e.message,'error');
+    }finally{
+      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>18*1024*1024;
+      $('splitTranscribeAudio').disabled=!recordBlob;
+    }
+  }
+
+  // Divide el audio reproduciéndolo dentro del navegador y grabando tres
+  // segmentos comprimidos en Opus. El archivo original nunca se sube entero.
+  async function splitAudioIntoThree(file,onProgress){
+    const objectUrl=URL.createObjectURL(file);
+    const audio=document.createElement('audio');
+    audio.preload='auto';
+    audio.src=objectUrl;
+    audio.playsInline=true;
+    audio.style.display='none';
+    document.body.appendChild(audio);
+
+    let audioContext=null;
+    let source=null;
+    let destination=null;
+
+    try{
+      await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(new Error('No se pudo leer la duración del audio.')),30000);
+        audio.addEventListener('loadedmetadata',()=>{clearTimeout(timer);resolve();},{once:true});
+        audio.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('No se pudo abrir el audio. Probá con MP3, WAV, M4A u OGG.'));},{once:true});
+        if(audio.readyState>=1){clearTimeout(timer);resolve();}
+        else audio.load();
+      });
+
+      const duration=audio.duration;
+      if(!Number.isFinite(duration)||duration<=0)throw new Error('No se pudo detectar la duración del audio.');
+      if(duration>3*60*60)throw new Error('El audio supera las 3 horas. Para mantener cada parte debajo del límite de carga, esta función admite hasta 3 horas.');
+
+      const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+      if(!AudioContextClass||!window.MediaRecorder)throw new Error('Tu navegador no permite dividir audio. Probá con Chrome actualizado.');
+
+      const mimeType=['audio/webm;codecs=opus','audio/ogg;codecs=opus','audio/webm'].find(type=>MediaRecorder.isTypeSupported(type));
+      if(!mimeType)throw new Error('Tu navegador no admite el formato de audio comprimido necesario.');
+
+      audioContext=new AudioContextClass();
+      await audioContext.resume();
+      source=audioContext.createMediaElementSource(audio);
+      destination=audioContext.createMediaStreamDestination();
+      source.connect(destination);
+
+      const partDuration=duration/3;
+      const parts=[];
+      const maxPartSize=18*1024*1024;
+
+      async function seekTo(seconds){
+        if(Math.abs(audio.currentTime-seconds)<0.05)return;
+        await new Promise((resolve,reject)=>{
+          const timer=setTimeout(()=>reject(new Error('No se pudo ubicar el inicio de la siguiente parte.')),15000);
+          audio.addEventListener('seeked',()=>{clearTimeout(timer);resolve();},{once:true});
+          audio.currentTime=seconds;
+        });
+      }
+
+      async function recordPart(start,end,index){
+        await seekTo(start);
+        const chunks=[];
+        const recorder=new MediaRecorder(destination.stream,{mimeType,audioBitsPerSecond:32000});
+        const finished=new Promise((resolve,reject)=>{
+          recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
+          recorder.onerror=()=>reject(new Error('Falló la creación de la parte '+index+'.'));
+          recorder.onstop=()=>resolve(new Blob(chunks,{type:recorder.mimeType||mimeType}));
+        });
+
+        recorder.start(1000);
+        try{
+          await audio.play();
+          await new Promise((resolve,reject)=>{
+            const timeout=setTimeout(()=>{audio.pause();reject(new Error('La reproducción tardó demasiado al crear la parte '+index+'.'));},Math.max(60000,(end-start)*1000+30000));
+            const check=setInterval(()=>{
+              if(audio.currentTime>=end-0.04||audio.ended){
+                clearInterval(check);
+                clearTimeout(timeout);
+                audio.pause();
+                resolve();
+              }
+            },100);
+            audio.addEventListener('error',()=>{
+              clearInterval(check);
+              clearTimeout(timeout);
+              reject(new Error('El audio tuvo un error durante la división.'));
+            },{once:true});
+          });
+        }catch(error){
+          audio.pause();
+          if(recorder.state!=='inactive')recorder.stop();
+          await finished.catch(()=>{});
+          throw error;
+        }
+
+        if(recorder.state!=='inactive')recorder.stop();
+        const blob=await finished;
+        if(!blob.size)throw new Error('La parte '+index+' quedó vacía.');
+        if(blob.size>maxPartSize)throw new Error('La parte '+index+' supera los 18 MB incluso comprimida. El audio es demasiado largo para dividirlo solamente en tres partes.');
+
+        const outputMime=mimeType.startsWith('audio/ogg')?'audio/ogg':'audio/webm';
+        const extension=outputMime==='audio/ogg'?'ogg':'webm';
+        return new File([blob],'audio-parte-'+index+'.'+extension,{type:outputMime,lastModified:Date.now()});
+      }
+
+      for(let i=0;i<3;i++){
+        onProgress('Creando parte '+(i+1)+' de 3...');
+        const start=i*partDuration;
+        const end=i===2?duration:(i+1)*partDuration;
+        parts.push(await recordPart(start,end,i+1));
+      }
+      return parts;
+    }finally{
+      audio.pause();
+      try{
+        source?.disconnect();
+        destination?.stream.getTracks().forEach(track=>track.stop());
+      }catch(e){}
+      if(audioContext&&audioContext.state!=='closed')await audioContext.close().catch(()=>{});
+      audio.removeAttribute('src');
+      audio.load();
+      audio.remove();
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  async function transcribeThreeParts(file){
+    if(!file)return;
+    if(!isConfigured()){
+      status('recordStatus','Primero configurá la conexión IA.','error');
+      return;
+    }
+
+    const splitButton=$('splitTranscribeAudio');
+    splitButton.disabled=true;
+    $('transcribeAudio').disabled=true;
+    $('summarizeRecord').disabled=true;
+    $('downloadRecordText').disabled=true;
+    recordTranscript='';
+    $('recordTranscript').textContent='Preparando las tres partes del audio...';
+    const completed=[];
+
+    try{
+      const parts=await splitAudioIntoThree(file,message=>status('recordStatus',message));
+      for(let i=0;i<parts.length;i++){
+        status('recordStatus','Transcribiendo parte '+(i+1)+' de 3 con Gemini...');
+        const result=await callAI({},parts[i]);
+        const text=(result.transcript||'').trim();
+        if(!text)throw new Error('Gemini no detectó voz en la parte '+(i+1)+'.');
+
+        completed.push('PARTE '+(i+1)+' DE 3\n\n'+text);
+        recordTranscript=completed.join('\n\n');
+        $('recordTranscript').textContent=recordTranscript;
+        $('summarizeRecord').disabled=false;
+        $('downloadRecordText').disabled=false;
+        currentTitle=getTitle('recordTitle');
+        currentTranscript=recordTranscript;
+        persistSession({title:currentTitle,transcript:recordTranscript,mode:'record'});
+      }
+
+      status('recordStatus','¡Listo! Las tres partes se transcribieron y se unieron en un solo texto.','good');
+    }catch(error){
+      status('recordStatus',error.message||'No se pudo dividir o transcribir el audio.','error');
+      if(recordTranscript.trim()){
+        $('summarizeRecord').disabled=false;
+        $('downloadRecordText').disabled=false;
+      }
+    }finally{
+      splitButton.disabled=!recordBlob;
+      $('transcribeAudio').disabled=!recordBlob||recordBlob.size>18*1024*1024;
+    }
+  }
+
   $('transcribeAudio').onclick=()=>transcribeAudio(recordBlob);
-  $('audioFile').onchange=e=>{const file=e.target.files?.[0];if(file){recordBlob=file;$('transcribeAudio').disabled=false;status('recordStatus','Archivo listo: '+file.name+'. Presioná “Pasar audio a texto”.','good');}};
+  $('splitTranscribeAudio').onclick=()=>transcribeThreeParts(recordBlob);
+  $('audioFile').onchange=e=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    recordBlob=file;
+    $('splitTranscribeAudio').disabled=false;
+    $('transcribeAudio').disabled=file.size>18*1024*1024;
+    const sizeMB=(file.size/(1024*1024)).toFixed(1);
+    if(file.size>18*1024*1024){
+      status('recordStatus','Archivo listo: '+file.name+' ('+sizeMB+' MB). Usá “Dividir en 3 partes y transcribir”.','good');
+    }else{
+      status('recordStatus','Archivo listo: '+file.name+' ('+sizeMB+' MB). Podés transcribirlo directamente o dividirlo en tres partes.','good');
+    }
+  };
   $('summarizeRecord').onclick=async()=>{if(!recordTranscript.trim())return;status('recordStatus','La IA está organizando el material de estudio…');try{const title=getTitle('recordTitle');const data=await callAI({action:'summarize',mode:'full',title,transcript:recordTranscript});currentTitle=title;currentTranscript=recordTranscript;currentResult=data.study||data;persistSession({title,transcript:recordTranscript,result:currentResult,mode:'record'});$('outputHeading').textContent=title;renderStudy(currentResult);$('outputWrap').classList.remove('hidden');$('outputWrap').scrollIntoView({behavior:'smooth'});status('recordStatus','Material de estudio listo.','good');}catch(e){status('recordStatus',e.message,'error');}};
   $('downloadRecordText').onclick=()=>downloadText(recordTranscript,'transcripcion-aula-clara.txt','text/plain');
 
@@ -239,3 +1043,7 @@
 </script>
 </body>
 </html>
+
+
+
+
